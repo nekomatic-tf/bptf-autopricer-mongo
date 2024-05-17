@@ -16,6 +16,8 @@ const ITEM_LIST_PATH = './files/item_list.json';
 
 const { listen, socketIO } = require('./API/server.js');
 
+const { Worker } = require('node:worker_threads');
+
 // Steam API key is required for the schema manager to work.
 const schemaManager = new Schema({
     apiKey: config.steamAPIKey
@@ -184,6 +186,7 @@ const updateFromSnapshot = async (name, sku) => {
 }
 
 const calculateAndEmitPrices = async () => {
+    let item_objects = [];
     stats.custom = 0; // Reset stats
     stats.pricestf = 1; // Reset stats
     var completed = 0;
@@ -199,9 +202,9 @@ const calculateAndEmitPrices = async () => {
             // Get sku of item via the item name.
             let sku = schemaManager.schema.getSkuFromName(name);
             // Delete old listings from database.
-            await deleteOldListings();
+            //await deleteOldListings();  // Handled by a worker
             // Use snapshot API to populate database with listings for item.
-            await updateFromSnapshot(name, sku);
+            //await updateFromSnapshot(name, sku); // Handled by a worker
             // Start process of pricing item.
             let arr = await determinePrice(name, sku);
             let item = finalisePrice(arr, name, sku);
@@ -212,18 +215,34 @@ const calculateAndEmitPrices = async () => {
             // Save item to pricelist. Pricelist.json is mainly used by the pricing API.
             Methods.addToPricelist(item, PRICELIST_PATH);
             console.log(`| PRICER |: Priced ${name}.`);
-            socketIO.emit('price', item);
-            console.log(`| SOCKET |: Emitted price for ${name}.`);
+            // Instead of emitting item here, we store it in a array, so we can emit all items at once.
+            // This allows us to control the speed at which we emit items to the client.
+            // Up to your own discretion whether this is neeeded or not.
+            item_objects.push(item);
             stats.custom++;
         } catch (e) { // Fallback to prices.tf price.
             console.log(`${e.toString()}\n| PRICER |: Failed to price ${name}, using prices.tf.`);
             let item = Methods.getItemPriceFromExternalPricelist(schemaManager.schema.getSkuFromName(name), external_pricelist);
-            socketIO.emit('price', item['pricetfItem']);
-            console.log(`| SOCKET |: Emitted price for ${name}.`);
+            // Instead of emitting item here, we store it in a array, so we can emit all items at once.
+            // This allows us to control the speed at which we emit items to the client.
+            // Up to your own discretion whether this is neeeded or not.
+            item_objects.push(item['pricetfItem']);
             stats.pricestf++;
         }
         completed++;
         console.log(`| STATUS |: PRTCING\nItems left : ${allowedItemNames.size - completed}\nCompleted  : ${completed}\nItems priced with pricer    : ${stats.custom}\nItems prices with prices.tf : ${stats.pricestf}`);
+    }
+    // Emit all items within extremely quick succession of eachother.
+    // With a 0.3 second gap between each.
+    var socket_remaining = item_objects.length;
+    var socket_emitted = 0;
+    for (const item of item_objects) {
+        // Emit item object.
+        await Methods.waitXSeconds(0.3);
+        socketIO.emit('price', item);
+        console.log(`| SOCKET |: STATUS\nRemaining: ${socket_remaining - socket_emitted}\nCompleted: ${socket_emitted}`);
+        console.log(`| SOCKET |: Emitted price for ${item.name}.`);
+        socket_emitted++;
     }
     console.log(`| STATUS |: COMPLETE\nCompleted  : ${completed}\nItems priced with pricer    : ${stats.custom}\nItems prices with prices.tf : ${stats.pricestf}`);
     runPricerDelay(); // Begin loop once again
@@ -242,6 +261,7 @@ function handleEvent(e) {
         let response_item = e.payload.item;
         let steamid = e.payload.steamid;
         let intent = e.payload.intent;
+        console.log(`| WEBSOCKET |: Recieved price event for ${e.payload.item.name}.`);
         switch (e.event) {
             case 'listing-update':
                 let currencies = e.payload.currencies;
@@ -325,13 +345,12 @@ schemaManager.init(async function(err) {
     if (err) {
         throw err;
     }
+    new Worker('./snapshot-worker.js'); // Snapshot worker
     // Update key object.
     await updateKeyObject();
     // Get external pricelist.
     external_pricelist = await Methods.getExternalPricelist();
-    // Calculate and emit prices on startup.
-    await calculateAndEmitPrices();
-
+    
     // Listen for events from the bptf socket.
     rws.addEventListener('message', event => {
         var json = JSON.parse(event.data);
@@ -342,7 +361,8 @@ schemaManager.init(async function(err) {
             handleEvent(json); // old event-per-frame message format - DEPRECATED!
         }
     });
-    
+
+      
     // Set-up timers for updating key-object, external pricelist and creating prices from listing data.
     // Get external pricelist every 30 mins.
     setInterval(async () => {
@@ -366,6 +386,9 @@ schemaManager.init(async function(err) {
     setInterval(async () => {
         await calculateAndEmitPrices();
     }, 15 * 60 * 1000); // Every 15 minutes.*/
+
+    // Calculate and emit prices on startup.
+    await calculateAndEmitPrices();
 });
 
 const getListings = async (name, intent) => {
