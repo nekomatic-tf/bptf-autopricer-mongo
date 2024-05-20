@@ -46,7 +46,7 @@ Methods.prototype.parsePrice = function(original, keyPrice) {
 
 Methods.prototype.toMetal = function(obj, keyPriceInMetal) {
     var metal = 0;
-    metal += obj.keys * keyPriceInMetal;
+    metal += obj.keys ? obj.keys : 0 * keyPriceInMetal;
     metal += obj.metal;
     return this.getRight(metal);
 };
@@ -237,28 +237,6 @@ Methods.prototype.addToPricelist = function(item, PRICELIST_PATH) {
 };
 
 // Request related methods.
-
-Methods.prototype.getListingsFromSnapshots = async function(name) {
-    try {
-        // Endpoint is limited to 1 request per 60 seconds.
-        await this.waitXSeconds(1);
-        const response = await axios.get(`https://backpack.tf/api/classifieds/listings/snapshot`, {
-            params: {
-                sku: name,
-                appid: 440,
-                token: config.bptfToken
-            }
-        });
-        if (response.status === 200) {
-            const listings = response.data.listings;
-            return listings;
-        } else {
-            throw new Error("Rate limited.");
-        }
-    } catch (error) {
-        throw error;
-    }
-};
 
 Methods.prototype.getJWTFromPricesTF = async function(page, limit) {
     let tries = 1;

@@ -1,5 +1,3 @@
-const ReconnectingWebSocket = require('reconnecting-websocket');
-const ws = require('ws');
 const fs = require('fs');
 const chokidar = require('chokidar');
 
@@ -16,7 +14,9 @@ const ITEM_LIST_PATH = './files/item_list.json';
 
 const { listen, socketIO } = require('./API/server.js');
 
-const { Worker } = require('node:worker_threads');
+const { MongoClient } = require('mongodb');
+const client = new MongoClient(config.mongo.uri);
+var db;
 
 // Steam API key is required for the schema manager to work.
 const schemaManager = new Schema({
@@ -34,29 +34,6 @@ const excludedListingDescriptions = config.excludedListingDescriptions;
 
 // Blocked attributes that we want to ignore. (Paints, parts, etc.)
 const blockedAttributes = config.blockedAttributes;
-
-const alwaysQuerySnapshotAPI = config.alwaysQuerySnapshotAPI;
-
-// Create database instance for pg-promise.
-const pgp = require('pg-promise')({
-    schema: config.database.schema
-});
-
-// Create a database instance
-const cn = {
-    host: config.database.host,
-    port: config.database.port,
-    database: config.database.name,
-    user: config.database.user,
-    password: config.database.password
-};
-
-const db = pgp(cn);
-
-// ColumnSet object for insert queries.
-const cs = new pgp.helpers.ColumnSet(['name', 'sku', 'currencies', 'intent', 'updated', 'steamid'], {
-    table: 'listings'
-});
 
 var stats = { // Stats for amount of items priced by what source.
     custom: 0,
@@ -111,13 +88,6 @@ const updateKeyObject = async () => {
     socketIO.emit('price', key_item);
 }
 
-const rws = new ReconnectingWebSocket('wss://ws.backpack.tf/events/', undefined, {
-    WebSocket: ws,
-    headers: {
-        'batch-test': true
-    }
-});
-
 let allowedItemNames = new Set();
 
 // Read and initialize the names of the items we want to get prices for.
@@ -143,48 +113,6 @@ watcher.on('change', path => {
     loadNames();
 });
 
-rws.addEventListener('open', event => {
-    console.log('Connected to socket.');
-});
-
-const countListingsForItem = async (name) => {
-    try {
-        const result = await db.one(`
-            SELECT 
-                COUNT(*) FILTER (WHERE intent = 'sell') AS sell_count,
-                COUNT(*) FILTER (WHERE intent = 'buy') AS buy_count
-            FROM listings
-            WHERE name = $1;
-        `, [name]);
-
-        const { sell_count, buy_count } = result;
-        return sell_count >= 1 && buy_count >= 10;
-    } catch (error) {
-        console.error("Error counting listings:", error);
-        throw error;
-    }
-};
-
-const updateFromSnapshot = async (name, sku) => {
-    // Check if always call snapshot API setting is enabled.
-    if (!alwaysQuerySnapshotAPI) {
-        // Check if required number of listings already exist in database for item.
-        // If not we need to query the snapshots API.
-        let callSnapshot = await countListingsForItem(name);
-        if(callSnapshot) {
-            // Get listings from snapshot API.
-            let unformatedListings = await Methods.getListingsFromSnapshots(name);
-            // Insert snapshot listings.
-            await insertListings(unformatedListings, sku, name);
-        }
-    } else {
-        // Get listings from snapshot API.
-        let unformatedListings = await Methods.getListingsFromSnapshots(name);
-        // Insert snapshot listings.
-        await insertListings(unformatedListings, sku, name);
-    }
-}
-
 const calculateAndEmitPrices = async () => {
     let item_objects = [];
     stats.custom = 0; // Reset stats
@@ -201,10 +129,6 @@ const calculateAndEmitPrices = async () => {
             }
             // Get sku of item via the item name.
             let sku = schemaManager.schema.getSkuFromName(name);
-            // Delete old listings from database.
-            //await deleteOldListings();  // Handled by a worker
-            // Use snapshot API to populate database with listings for item.
-            //await updateFromSnapshot(name, sku); // Handled by a worker
             // Start process of pricing item.
             let arr = await determinePrice(name, sku);
             let item = finalisePrice(arr, name, sku);
@@ -255,113 +179,19 @@ function runPricerDelay() { // Runs the pricer every defined amount of minutes
     }, config.priceTimeoutMin * 60 * 1000);
 }
 
-function handleEvent(e) {
-    // Only process relevant events.
-    if (allowedItemNames.has(e.payload.item.name)) {
-        let response_item = e.payload.item;
-        let steamid = e.payload.steamid;
-        let intent = e.payload.intent;
-        console.log(`| WEBSOCKET |: Recieved price event for ${e.payload.item.name}.`);
-        switch (e.event) {
-            case 'listing-update':
-                let currencies = e.payload.currencies;
-                let listingDetails = e.payload.details;
-                let listingItemObject = e.payload.item; // The item object where paint and stuff is stored.
-
-                // Ignore keys. We price those using prices.tf.
-                if (response_item.name === 'Mann Co. Supply Crate Key') {
-                    return;
-                }
-
-                // If userAgent field is not present, return.
-                // This indicates that the listing was not created by a bot.
-                if (!e.payload.userAgent) {
-                    return;
-                }
-
-                // Make sure currencies object contains at least one key related to metal or keys.
-                if (!Methods.validateObject(currencies)) {
-                    return;
-                }
-
-                // Filter out painted items.
-                if (listingItemObject.attributes && listingItemObject.attributes.some(attribute => {
-                    return typeof attribute === 'object' && // Ensure the attribute is an object.
-                        attribute.float_value &&  // Ensure the attribute has a float_value.
-                        // Check if the float_value is in the blockedAttributes object.
-                        Object.values(blockedAttributes).map(String).includes(String(attribute.float_value)) &&
-                        // Ensure the name of the item doesn't include any of the keys in the blockedAttributes object.
-                        !Object.keys(blockedAttributes).some(key => name.includes(key));
-                })) {
-                    return;  // Skip this listing. Listing is for a painted item.
-                }
-
-                // Create a currencies object that contains only metal and keys.
-                currencies = Methods.createCurrencyObject(currencies);
-
-                // Filter out listing if it's owned by blacklisted ID.
-                if (!excludedSteamIds.some(id => steamid === id)) {
-                    // Perform further filtering to ignore listing if it mentions spells in it's description.
-                    // Prices tend to be significantly different for spelled items.
-                    if (
-                        listingDetails &&
-                        !excludedListingDescriptions.some(detail =>
-                            listingDetails.normalize('NFKD').toLowerCase().trim().includes(detail)
-                        )
-                    ) {
-                        try {
-                            // Generate SKU from name. Found out that a perfect version of this method was already
-                            // created by the developers who worked on tf2autobot. I believe they forked Nicklasons
-                            // original module and then added a bunch more features.
-                            var sku = schemaManager.schema.getSkuFromName(response_item.name);
-                            if (sku === null || sku === undefined) {
-                                throw new Error(
-                                    `| UPDATING PRICES |: Couldn't price ${response_item.name}. Issue with retrieving this items defindex.`
-                                );
-                            }
-                            insertListing(response_item, sku, currencies, intent, steamid);
-                        } catch (e) {
-                            console.log(e);
-                            console.log("Couldn't create a price for " + response_item.name);
-                        }
-                    }
-                }
-                break;
-            case 'listing-delete':
-                try {
-                    // Removes the listing that has been deleted from backpack.tf from our database.
-                    deleteRemovedListing(steamid, response_item.name, intent);
-                } catch (e) {
-                    // console.log(e);
-                    return;
-                }
-                break;
-        }
-    }
-}
-
 // When the schema manager is ready we proceed.
 schemaManager.init(async function(err) {
     if (err) {
         throw err;
     }
-    new Worker('./snapshot-worker.js'); // Snapshot worker
+    // Connect to MongoDB
+    await client.connect();
+    db = await client.db(config.mongo.db).collection('listings');
+    console.log(`| MONGO |: Connected.`);
     // Update key object.
     await updateKeyObject();
     // Get external pricelist.
     external_pricelist = await Methods.getExternalPricelist();
-    
-    // Listen for events from the bptf socket.
-    rws.addEventListener('message', event => {
-        var json = JSON.parse(event.data);
-        // forwards-compatible support of the batch mode, if you did not set the batch-test header.
-        if (json instanceof Array) {
-            json.forEach(handleEvent); // handles the new event format
-        } else {
-            handleEvent(json); // old event-per-frame message format - DEPRECATED!
-        }
-    });
-
       
     // Set-up timers for updating key-object, external pricelist and creating prices from listing data.
     // Get external pricelist every 30 mins.
@@ -392,144 +222,79 @@ schemaManager.init(async function(err) {
 });
 
 const getListings = async (name, intent) => {
-    return await db.result(`SELECT * FROM listings WHERE name = $1 AND intent = $2`, [name, intent]);
-};
-
-const insertListing = async (response_item, sku, currencies, intent, steamid) => {
-    let timestamp = Math.floor(Date.now() / 1000);
-    return await db.none(
-        `INSERT INTO listings (name, sku, currencies, intent, updated, steamid)\
-         VALUES ($1, $2, $3, $4, $5, $6)\
-         ON CONFLICT (name, sku, intent, steamid)\
-         DO UPDATE SET currencies = $3, updated = $5;`,
-        [response_item.name, sku, JSON.stringify(currencies), intent, timestamp, steamid]
-    );
-};
-
-const insertListings = async (unformattedListings, sku, name) => {
-    // If there are no listings from the snapshot just return. No update can be done.
-    if (!unformattedListings) {
-        throw new Error(`No listings found for ${name} in the snapshot. The name: '${name}' likely doesn't match the version on the items bptf listings page.`);
-    }
-    try {
-        let formattedListings = [];
-        const uniqueSet = new Set(); // Create a set to store unique combinations
-
-        // Calculate timestamp once, no point doing it for each iteration.
-        // We take 60 seconds from the timestamp as snapshots results can be up to a minute old.
-        // This allows us to essentially prioritise keeping the listings in the database that
-        // were added by the websocket. As we know they are the most up-to-date.
-        let updated = Math.floor(Date.now() / 1000) - 60;
-
-        for (const listing of unformattedListings) {
-            if (
-                listing.details &&
-                excludedListingDescriptions.some(detail =>
-                    listing.details.normalize('NFKD').toLowerCase().trim().includes(detail)
-                )
-            ) {
-                // Skip this listing. Listing is for a spelled item.
-                continue;
+    const result = await db.aggregate([
+        {
+            $match: {
+                "name": name,
             }
-
-            // The item object where paint and stuff is stored.
-            const listingItemObject = listing.item;
-
-            // Filter out painted items.
-            if (listingItemObject.attributes && listingItemObject.attributes.some(attribute => {
-                return typeof attribute === 'object' && // Ensure the attribute is an object.
-                    attribute.float_value &&  // Ensure the attribute has a float_value.
-                    // Check if the float_value is in the blockedAttributes object.
-                    Object.values(blockedAttributes).map(String).includes(String(attribute.float_value)) &&
-                    // Ensure the name of the item doesn't include any of the keys in the blockedAttributes object.
-                    !Object.keys(blockedAttributes).some(key => name.includes(key));
-            })) {
-                continue;  // Skip this listing. Listing is for a painted item.
+        },
+        {
+            $project: {
+                listings: {
+                    $filter: {
+                        input: "$listings",
+                        as: "listing",
+                        cond: { $eq: ["$$listing.intent", intent] }
+                    }
+                }
             }
-
-            // If userAgent field is not present, continue.
-            // This indicates that the listing was not created by a bot.
-            if (!listing.userAgent) {
-                continue;
-            }
-
-            // Create a unique key for each listing comprised
-            // of each key of the composite primary key.
-            const uniqueKey = `${listing.steamid}-${name}-${sku}-${listing.intent}`;
-            // Check if this combination is already in the uniqueSet
-            if (uniqueSet.has(uniqueKey)) {
-                // Duplicate entry, skip this listing.
-                continue;
-            }
-            // Add the unique combination to the set
-            uniqueSet.add(uniqueKey);
-
-            let formattedListing = {};
-            // We set name to what we know it should be.
-            formattedListing.name = name;
-            // We set the sku to what we generated.
-            formattedListing.sku = sku;
-            let currenciesValid = Methods.validateObject(listing.currencies);
-            // If currencies is invalid.
-            if (!currenciesValid) {
-                // Skip this listing.
-                continue;
-            }
-            let validatedCurrencies = Methods.createCurrencyObject(listing.currencies);
-            formattedListing.currencies = JSON.stringify(validatedCurrencies);
-            formattedListing.intent = listing.intent;
-            formattedListing.updated = updated;
-            formattedListing.steamid = listing.steamid;
-
-            formattedListings.push(formattedListing);
         }
-
-        if (formattedListings.length > 0) {
-            // Bulk insert rows into the table using pg-promise module.
-            // I only update the listings if the updated timestamp is greater than the current one.
-            // We do this to ensure that we don't overwrite a newer listing with an older one.
-            const query =
-                pgp.helpers.insert(formattedListings, cs, 'listings') +
-                ` ON CONFLICT (name, sku, intent, steamid)\
-                DO UPDATE SET currencies = excluded.currencies, updated = excluded.updated\
-                WHERE excluded.updated > listings.updated;`;
-
-            await db.none(query);
-        }
-        return;
-    } catch (e) {
-        console.log(e);
-        throw e;
-    }
-};
-
-// Arguably quite in-efficient but I don't see a good alternative at the moment.
-// 35 minutes old (or older) listings are removed.
-// Every 30 minutes listings on backpack.tf are bumped, given you have premium, which the majority of good bots do.
-// So, by setting the limit to 35 minutes it allows the pricer to catch those bump events and keep any related
-// listings in our database.
-
-// Otherwise, if the listing isn't bumped or we just don't recieve the event, we delete the old listing as it may have been deleted.
-// Backpack.tf may not have sent us the deleted event etc.
-const deleteOldListings = async () => {
-    return await db.any(`DELETE FROM listings WHERE EXTRACT(EPOCH FROM NOW() - to_timestamp(updated)) >= 2100;`);
-};
-
-const deleteRemovedListing = async (steamid, name, intent) => {
-    return await db.any(`DELETE FROM listings WHERE steamid = $1 AND name = $2 AND intent = $3;`, [
-        steamid,
-        name,
-        intent
-    ]);
+    ]).toArray();
+    return result[0]['listings'];
 };
 
 const determinePrice = async (name, sku) => {
-    // Delete listings that are greater than 30 minutes old.
-    await deleteOldListings();
-
     var buyListings = await getListings(name, 'buy');
     var sellListings = await getListings(name, 'sell');
 
+    // Filter out unwanted listings from the MongoDB database
+    var buyListingsFiltered = buyListings.filter((listing) => {
+        let steamid = listing.steamid;
+        let listingDetails = listing.details;
+        let listingItemObject = listing.item; // The item object where paint and stuff is stored.
+         // Filter out painted items.
+         if (listingItemObject.attributes && listingItemObject.attributes.some(attribute => {
+            return typeof attribute === 'object' && // Ensure the attribute is an object.
+                attribute.float_value &&  // Ensure the attribute has a float_value.
+                // Check if the float_value is in the blockedAttributes object.
+                Object.values(blockedAttributes).map(String).includes(String(attribute.float_value)) &&
+                // Ensure the name of the item doesn't include any of the keys in the blockedAttributes object.
+                !Object.keys(blockedAttributes).some(key => name.includes(key));
+        })) {
+            return false;  // Skip this listing. Listing is for a painted item.
+        }
+        if (excludedSteamIds.some(id => steamid === id)) {
+            return false;
+        }
+        if (!listingDetails && excludedListingDescriptions.some(detail => listingDetails.normalize('NFKD').toLowerCase().trim().includes(detail))) {
+            return false;
+        }
+        return true;
+    }).map((listing) => { return listing; });
+
+    var sellListingsFiltered = sellListings.filter((listing) => {
+        let steamid = listing.steamid;
+        let listingDetails = listing.details; // This will decide whether or not we ignore the listings without a description in them.
+        let listingItemObject = listing.item; // The item object where paint and stuff is stored.
+         // Filter out painted items.
+         if (listingItemObject.attributes && listingItemObject.attributes.some(attribute => {
+            return typeof attribute === 'object' && // Ensure the attribute is an object.
+                attribute.float_value &&  // Ensure the attribute has a float_value.
+                // Check if the float_value is in the blockedAttributes object.
+                Object.values(blockedAttributes).map(String).includes(String(attribute.float_value)) &&
+                // Ensure the name of the item doesn't include any of the keys in the blockedAttributes object.
+                !Object.keys(blockedAttributes).some(key => name.includes(key));
+        })) {
+            return false;  // Skip this listing. Listing is for a painted item.
+        }
+        if (excludedSteamIds.some(id => steamid === id)) {
+            return false;
+        }
+        if (!listingDetails && excludedListingDescriptions.some(detail => listingDetails.normalize('NFKD').toLowerCase().trim().includes(detail))) {
+            return false;
+        }
+        return true;
+    }).map((listing) => { return listing; });
 
     // Get the price of the item from the in-memory external pricelist.
     var data;
@@ -552,11 +317,11 @@ const determinePrice = async (name, sku) => {
 
     try {
         // Check for undefined. No listings.
-        if (!buyListings || !sellListings) {
+        if (!buyListingsFiltered || !sellListingsFiltered) {
             throw new Error(`| UPDATING PRICES |: ${name} not enough listings...`);
         }
 
-        if (buyListings.rowCount === 0 || sellListings.rowCount === 0) {
+        if (buyListingsFiltered.rowCount === 0 || sellListingsFiltered.rowCount === 0) {
             throw new Error(`| UPDATING PRICES |: ${name} not enough listings...`);
         }
     } catch (e) {
@@ -564,7 +329,7 @@ const determinePrice = async (name, sku) => {
     }
 
     // Sort buyListings into descending order of price.
-    var buyFiltered = buyListings.rows.sort((a, b) => {
+    var buyFiltered = buyListingsFiltered.sort((a, b) => {
         let valueA = Methods.toMetal(a.currencies, keyobj.metal);
         let valueB = Methods.toMetal(b.currencies, keyobj.metal);
 
@@ -572,7 +337,7 @@ const determinePrice = async (name, sku) => {
     });
 
     // Sort sellListings into ascending order of price.
-    var sellFiltered = sellListings.rows.sort((a, b) => {
+    var sellFiltered = sellListingsFiltered.sort((a, b) => {
         let valueA = Methods.toMetal(a.currencies, keyobj.metal);
         let valueB = Methods.toMetal(b.currencies, keyobj.metal);
 
@@ -585,7 +350,7 @@ const determinePrice = async (name, sku) => {
     // I.e., we move listings by those trusted steamids to the front of the
     // array, to be used as a priority over any others.
 
-    buyFiltered = buyListings.rows.sort((a, b) => {
+    buyFiltered = buyListingsFiltered.sort((a, b) => {
         // Custom sorting logic to prioritize specific Steam IDs
         const aIsPrioritized = prioritySteamIds.includes(a.steamid);
         const bIsPrioritized = prioritySteamIds.includes(b.steamid);
@@ -599,7 +364,7 @@ const determinePrice = async (name, sku) => {
         }
     });
 
-    sellFiltered = sellListings.rows.sort((a, b) => {
+    sellFiltered = sellListingsFiltered.sort((a, b) => {
         // Custom sorting logic to prioritize specific Steam IDs
         const aIsPrioritized = prioritySteamIds.includes(a.steamid);
         const bIsPrioritized = prioritySteamIds.includes(b.steamid);

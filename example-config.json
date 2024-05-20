@@ -2,13 +2,9 @@
     "bptfAPIKey": "your bptf api key",
     "bptfToken": "your bptf token",
     "steamAPIKey": "your steam api key",
-    "database": {
-        "schema": "tf2",
-        "host": "localhost",
-        "port": 5432,
-        "name": "bptf-autopricer",
-        "user": "postgres",
-        "password": "database password"
+    "mongo": {
+        "uri": "mongodb://192.168.1.92/?directConnection=true",
+        "name": "backpacktf"
     },
     "pricerPort": 3456,
     "maxPercentageDifferences": {
