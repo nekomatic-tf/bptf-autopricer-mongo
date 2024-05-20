@@ -250,7 +250,7 @@ const determinePrice = async (name, sku) => {
     // Filter out unwanted listings from the MongoDB database
     var buyListingsFiltered = buyListings.filter((listing) => {
         let steamid = listing.steamid;
-        let listingDetails = listing.details;
+        let listingDetails = listing.details; // This will decide whether or not we ignore the listings without a description in them.
         let listingItemObject = listing.item; // The item object where paint and stuff is stored.
          // Filter out painted items.
          if (listingItemObject.attributes && listingItemObject.attributes.some(attribute => {
@@ -313,7 +313,6 @@ const determinePrice = async (name, sku) => {
         throw new Error(`| UPDATING PRICES |: Couldn't price ${name}. Item is not priced on price.tf, therefore we can't
         compare our average price to it's average price.`);
     }
-
 
     try {
         // Check for undefined. No listings.
