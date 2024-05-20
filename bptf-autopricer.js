@@ -86,6 +86,7 @@ const updateKeyObject = async () => {
     };
     // Emit new key price.
     socketIO.emit('price', key_item);
+    console.log('| CURRENCY |: Emitted new key price.');
 }
 
 let allowedItemNames = new Set();
@@ -115,16 +116,16 @@ watcher.on('change', path => {
 
 const calculateAndEmitPrices = async () => {
     let item_objects = [];
-    stats.custom = 0; // Reset stats
-    stats.pricestf = 1; // Reset stats
-    var completed = 0;
-    console.log(`| STATUS |: Items to price: ${allowedItemNames.size}`);
+    var custom = 0; // Reset stats
+    var pricestf = 0; // Reset stats
+    var completed = 0; // Reset stats
+    var remaining = allowedItemNames.size; // Reset stats
+    console.log(`| STATUS |: Items to price: ${remaining}`);
     for (const name of allowedItemNames) {
         try {
             // We don't calculate the price of a key here.
             if (name === 'Mann Co. Supply Crate Key') {
-                completed++;
-                stats.pricestf++; // Always set key as if it was priced by prices.tf
+                remaining--;
                 continue;
             }
             // Get sku of item via the item name.
@@ -143,32 +144,33 @@ const calculateAndEmitPrices = async () => {
             // This allows us to control the speed at which we emit items to the client.
             // Up to your own discretion whether this is neeeded or not.
             item_objects.push(item);
-            stats.custom++;
+            custom++;
         } catch (e) { // Fallback to prices.tf price.
             console.log(`${e.toString()}\n| PRICER |: Failed to price ${name}, using prices.tf.`);
             let item = Methods.getItemPriceFromExternalPricelist(schemaManager.schema.getSkuFromName(name), external_pricelist);
+            Methods.addToPricelist(item['pricetfItem'], PRICELIST_PATH);
             // Instead of emitting item here, we store it in a array, so we can emit all items at once.
             // This allows us to control the speed at which we emit items to the client.
             // Up to your own discretion whether this is neeeded or not.
             item_objects.push(item['pricetfItem']);
-            stats.pricestf++;
+            pricestf++;
         }
         completed++;
-        console.log(`| STATUS |: PRTCING\nItems left : ${allowedItemNames.size - completed}\nCompleted  : ${completed}\nItems priced with pricer    : ${stats.custom}\nItems prices with prices.tf : ${stats.pricestf}`);
+        console.log(`| STATUS |: PRTCING\nItems left : ${remaining - completed}\nCompleted  : ${completed}\nItems priced with pricer    : ${custom}\nItems prices with prices.tf : ${pricestf}`);
     }
     // Emit all items within extremely quick succession of eachother.
     // With a 0.3 second gap between each.
-    var socket_remaining = item_objects.length;
     var socket_emitted = 0;
+    console.log(`| SOCKET |: STATUS\nRemaining: ${item_objects.length - socket_emitted}\nCompleted: ${socket_emitted}`);
     for (const item of item_objects) {
         // Emit item object.
         await Methods.waitXSeconds(0.3);
         socketIO.emit('price', item);
-        console.log(`| SOCKET |: STATUS\nRemaining: ${socket_remaining - socket_emitted}\nCompleted: ${socket_emitted}`);
         console.log(`| SOCKET |: Emitted price for ${item.name}.`);
         socket_emitted++;
+        console.log(`| SOCKET |: STATUS\nRemaining: ${item_objects.length - socket_emitted}\nCompleted: ${socket_emitted}`);
     }
-    console.log(`| STATUS |: COMPLETE\nCompleted  : ${completed}\nItems priced with pricer    : ${stats.custom}\nItems prices with prices.tf : ${stats.pricestf}`);
+    console.log(`| STATUS |: COMPLETE\nCompleted  : ${completed}\nItems priced with pricer    : ${custom}\nItems prices with prices.tf : ${pricestf}`);
     runPricerDelay(); // Begin loop once again
 };
 
@@ -211,11 +213,6 @@ schemaManager.init(async function(err) {
             console.error(e);
         }
     }, 3 * 60 * 1000);
-
-    /*// Calculate prices using listing data every 15 minutes.
-    setInterval(async () => {
-        await calculateAndEmitPrices();
-    }, 15 * 60 * 1000); // Every 15 minutes.*/
 
     // Calculate and emit prices on startup.
     await calculateAndEmitPrices();
