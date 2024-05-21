@@ -147,12 +147,18 @@ const calculateAndEmitPrices = async () => {
             custom++;
         } catch (e) { // Fallback to prices.tf price.
             console.log(`${e.toString()}\n| PRICER |: Failed to price ${name}, using prices.tf.`);
-            let item = Methods.getItemPriceFromExternalPricelist(schemaManager.schema.getSkuFromName(name), external_pricelist);
-            Methods.addToPricelist(item['pricetfItem'], PRICELIST_PATH);
+            let item;
+            try {
+                item = Methods.getItemPriceFromExternalPricelist(schemaManager.schema.getSkuFromName(name), external_pricelist)['pricetfItem'];
+            } catch(e) {
+                item = await Methods.getItemPriceFromExternalAPI(schemaManager.schema.getSkuFromName(name), name);
+                await Methods.waitXSeconds(2); // Anti rate limit
+            }
+            Methods.addToPricelist(item, PRICELIST_PATH);
             // Instead of emitting item here, we store it in a array, so we can emit all items at once.
             // This allows us to control the speed at which we emit items to the client.
             // Up to your own discretion whether this is neeeded or not.
-            item_objects.push(item['pricetfItem']);
+            item_objects.push(item);
             pricestf++;
         }
         completed++;
@@ -249,8 +255,18 @@ const determinePrice = async (name, sku) => {
         let steamid = listing.steamid;
         let listingDetails = listing.details; // This will decide whether or not we ignore the listings without a description in them.
         let listingItemObject = listing.item; // The item object where paint and stuff is stored.
-         // Filter out painted items.
-         if (listingItemObject.attributes && listingItemObject.attributes.some(attribute => {
+        let currencies = listing.currencies;
+        // If userAgent field is not present, return.
+        // This indicates that the listing was not created by a bot.
+        if (!listing.user_agent) {
+            return false;
+        }
+        // Make sure currencies object contains at least one key related to metal or keys.
+        if (!Methods.validateObject(currencies)) {
+            return false;
+        }
+        // Filter out painted items.
+        if (listingItemObject.attributes && listingItemObject.attributes.some(attribute => {
             return typeof attribute === 'object' && // Ensure the attribute is an object.
                 attribute.float_value &&  // Ensure the attribute has a float_value.
                 // Check if the float_value is in the blockedAttributes object.
@@ -263,7 +279,7 @@ const determinePrice = async (name, sku) => {
         if (excludedSteamIds.some(id => steamid === id)) {
             return false;
         }
-        if (!listingDetails && excludedListingDescriptions.some(detail => listingDetails.normalize('NFKD').toLowerCase().trim().includes(detail))) {
+        if (listingDetails && excludedListingDescriptions.some(detail => listingDetails.normalize('NFKD').toLowerCase().trim().includes(detail))) {
             return false;
         }
         return true;
@@ -273,8 +289,18 @@ const determinePrice = async (name, sku) => {
         let steamid = listing.steamid;
         let listingDetails = listing.details; // This will decide whether or not we ignore the listings without a description in them.
         let listingItemObject = listing.item; // The item object where paint and stuff is stored.
-         // Filter out painted items.
-         if (listingItemObject.attributes && listingItemObject.attributes.some(attribute => {
+        let currencies = listing.currencies;
+        // If userAgent field is not present, return.
+        // This indicates that the listing was not created by a bot.
+        if (!listing.user_agent) {
+            return false;
+        }
+        // Make sure currencies object contains at least one key related to metal or keys.
+        if (!Methods.validateObject(currencies)) {
+            return false;
+        }
+        // Filter out painted items.
+        if (listingItemObject.attributes && listingItemObject.attributes.some(attribute => {
             return typeof attribute === 'object' && // Ensure the attribute is an object.
                 attribute.float_value &&  // Ensure the attribute has a float_value.
                 // Check if the float_value is in the blockedAttributes object.
@@ -287,21 +313,24 @@ const determinePrice = async (name, sku) => {
         if (excludedSteamIds.some(id => steamid === id)) {
             return false;
         }
-        if (!listingDetails && excludedListingDescriptions.some(detail => listingDetails.normalize('NFKD').toLowerCase().trim().includes(detail))) {
+        if (listingDetails && excludedListingDescriptions.some(detail => listingDetails.normalize('NFKD').toLowerCase().trim().includes(detail))) {
             return false;
         }
         return true;
     }).map((listing) => { return listing; });
 
     // Get the price of the item from the in-memory external pricelist.
-    var data;
+    var pricetfItem;
     try {
-        data = Methods.getItemPriceFromExternalPricelist(sku, external_pricelist);
+        pricetfItem = Methods.getItemPriceFromExternalPricelist(sku, external_pricelist)['pricetfItem'];
     } catch (e) {
-        throw new Error(`| UPDATING PRICES |: Couldn't price ${name}. Issue with Price.tf.`);
+        try {
+            pricetfItem = await Methods.getItemPriceFromExternalAPI(sku, name);
+            await Methods.waitXSeconds(2); // Anti rate limit
+        } catch(e) {
+            throw new Error(`| UPDATING PRICES |: Couldn't price ${name}. Issue with Price.tf.`);
+        }
     }
-
-    var pricetfItem = data.pricetfItem;
 
     if (
         (pricetfItem.buy.keys === 0 && pricetfItem.buy.metal === 0) ||
@@ -511,6 +540,7 @@ const finalisePrice = (arr, name, sku) => {
             console.log(
                 `| UPDATING PRICES |:${name} couldn't be updated. CRITICAL, something went wrong in the getAverages logic.`
             );
+
             throw new Error('Something went wrong in the getAverages() logic. DEVELOPER LOOK AT THIS.');
             // Will ensure that neither the buy, nor sell side is completely unpriced. If it is, this means we couldn't get
             // enough listings to create a price, and we also somehow bypassed our prices.tf safety check. So instead, we

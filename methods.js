@@ -46,7 +46,7 @@ Methods.prototype.parsePrice = function(original, keyPrice) {
 
 Methods.prototype.toMetal = function(obj, keyPriceInMetal) {
     var metal = 0;
-    metal += obj.keys ? obj.keys : 0 * keyPriceInMetal;
+    metal += (obj.keys ? obj.keys : 0) * keyPriceInMetal;
     metal += obj.metal;
     return this.getRight(metal);
 };
@@ -71,6 +71,54 @@ Methods.prototype.getItemPriceFromExternalPricelist = function(sku, external_pri
         }
     }
     throw new Error('Item not found in external pricelist.');
+};
+
+Methods.prototype.getItemPriceFromExternalAPI = async function(sku, name) { // Backup if external pricelist fails
+    let key_object = {};
+
+    try {
+        const axiosConfig = await this.getJWTFromPricesTF(1, 100);
+        const response = await axios.get(`https://api2.prices.tf/prices/${sku}`, axiosConfig);
+
+        if (response.status === 200) {
+            key_object.name = name;
+            key_object.sku = sku;
+            key_object.source = 'bptf';
+
+            let buyKeys = Object.is(response.data.buyKeys, undefined) ? 0 : response.data.buyKeys;
+
+            let buyMetal = this.halfScrapToRefined(
+                Object.is(response.data.buyHalfScrap, undefined) ? 0 : response.data.buyHalfScrap
+            );
+
+            buyMetal = this.getRight(buyMetal);
+
+            key_object.buy = {
+                keys: buyKeys,
+                metal: buyMetal
+            };
+
+            let sellKeys = Object.is(response.data.sellKeys, undefined) ? 0 : response.data.sellKeys;
+
+            let sellMetal = this.halfScrapToRefined(
+                Object.is(response.data.sellHalfScrap, undefined) ? 0 : response.data.sellHalfScrap
+            );
+
+            sellMetal = this.getRight(sellMetal);
+
+            key_object.sell = {
+                keys: sellKeys,
+                metal: sellMetal
+            };
+
+            key_object.time = Math.floor(Date.now() / 1000);
+
+            return key_object;
+        }
+        throw new Error('Failed to get item price from Prices.TF. It is either down or we are being rate-limited.');
+    } catch (error) {
+        throw error;
+    }
 };
 
 // Calculate percentage differences and decide on rejecting or accepting the autopricers price
