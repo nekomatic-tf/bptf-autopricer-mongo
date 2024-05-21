@@ -177,15 +177,10 @@ const calculateAndEmitPrices = async () => {
         console.log(`| SOCKET |: STATUS\nRemaining: ${item_objects.length - socket_emitted}\nCompleted: ${socket_emitted}`);
     }
     console.log(`| STATUS |: COMPLETE\nCompleted  : ${completed}\nItems priced with pricer    : ${custom}\nItems prices with prices.tf : ${pricestf}`);
-    runPricerDelay(); // Begin loop once again
-};
-
-function runPricerDelay() { // Runs the pricer every defined amount of minutes
     console.log(`| TIMER |: Running pricer again in ${config.priceTimeoutMin} minute(s).`);
-    setTimeout(async () => {
-        await calculateAndEmitPrices();
-    }, config.priceTimeoutMin * 60 * 1000);
-}
+    await Methods.waitXSeconds(config.priceTimeoutMin * 60);
+    await calculateAndEmitPrices();
+};
 
 // When the schema manager is ready we proceed.
 schemaManager.init(async function(err) {
