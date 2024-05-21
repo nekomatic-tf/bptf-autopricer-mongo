@@ -319,30 +319,6 @@ Methods.prototype.getJWTFromPricesTF = async function(page, limit) {
     throw new Error('An error occurred while getting authenticated with Prices.tf');
 };
 
-Methods.prototype.getKeyPriceFromPricesTF = async function() {
-    try {
-        const axiosConfig = await this.getJWTFromPricesTF(1, 100);
-
-        let tries = 1;
-        while (tries <= 5) {
-            const response = await axios.get('https://api2.prices.tf/prices/5021;6', axiosConfig);
-
-            if (response.status === 200) {
-                const sellMetal = Methods.halfScrapToRefined(response.data.sellHalfScrap);
-                return {
-                    metal: sellMetal
-                };
-            }
-
-            tries++;
-        }
-
-        throw new Error('Failed to get key price from Prices.TF. It is either down or we are being rate-limited.');
-    } catch (error) {
-        throw error;
-    }
-};
-
 Methods.prototype.getKeyFromExternalAPI = async function() {
     let key_object = {};
 
