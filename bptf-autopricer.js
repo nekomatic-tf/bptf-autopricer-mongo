@@ -151,7 +151,13 @@ const calculateAndEmitPrices = async () => {
             try {
                 item = Methods.getItemPriceFromExternalPricelist(schemaManager.schema.getSkuFromName(name), external_pricelist)['pricetfItem'];
             } catch(e) {
-                item = await Methods.getItemPriceFromExternalAPI(schemaManager.schema.getSkuFromName(name), name);
+                try {
+                    item = await Methods.getItemPriceFromExternalAPI(schemaManager.schema.getSkuFromName(name), name);
+                } catch(e) {
+                    console.log("| CRITICAL PRICER ERROR (RARE) |: FAILURE TO PRICE ITEM AT ALL, SKIPPING")
+                    console.log(`| ERROR |: ${e}`)
+                    continue // Skip ahead, we can't do anything about this item
+                }
                 await Methods.waitXSeconds(2); // Anti rate limit
             }
             Methods.addToPricelist(item, PRICELIST_PATH);
